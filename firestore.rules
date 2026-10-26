@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function ownsTask() { return signedIn() && resource.data.posterId == request.auth.uid; }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role in ['tasker','runner','both']
+        && !request.resource.data.keys().hasAny(['rating','reviewCount','successfulRuns','weeklyRuns','weeklyRunWeek']);
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','email','role','avatarUrl','avatarColor','photoURL','bio','phone','services','minimumPrice','lastLoginAt','updatedAt'])
+        && request.resource.data.role in ['tasker','runner','both'];
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /tasks/{id} {
+      // Open (paid) tasks are public so guests can browse; everything else needs sign-in.
+      allow read: if signedIn() || resource.data.status == 'open';
+      allow create: if signedIn() && request.resource.data.posterId == request.auth.uid
+        && request.resource.data.status == 'unpaid'
+        && request.resource.data.paymentStatus == 'unpaid';
+      // Payments, completion and payouts are server-only. Clients may only:
+      //  1. let the poster cancel a task that has not been paid for, or
+      //  2. let a runner claim a paid, open task that is not their own.
+      allow update: if signedIn() && (
+        (ownsTask() && resource.data.status == 'unpaid' && resource.data.paymentStatus == 'unpaid'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt'])
+          && request.resource.data.status == 'cancelled')
+        || (resource.data.status == 'open' && resource.data.paymentStatus == 'paid'
+          && resource.data.posterId != request.auth.uid
+          && request.resource.data.status == 'assigned'
+          && request.resource.data.runnerId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','runnerId','runnerName','acceptedAt']))
+      );
+      allow delete: if ownsTask() && resource.data.paymentStatus != 'paid';
+    }
+
+    match /reviews/{id} { allow read: if signedIn(); allow write: if false; }
+    match /notifications/{id} { allow read: if signedIn() && resource.data.userId == request.auth.uid; allow write: if false; }
+    // completionCodes and payoutAccounts have no rules on purpose: only Cloud Functions (Admin SDK) can touch them.
+  }
+}
